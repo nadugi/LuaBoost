@@ -1,24 +1,23 @@
 -- ================================================================
---  LuaBoost v1.0.0 — WoW 3.3.5a Lua Runtime Optimizer
+--  LuaBoost v1.1.0 — WoW 3.3.5a Lua Runtime Optimizer
 --  Author: Suprematist
 --
 --  Features:
 --   - Faster math.floor/ceil/abs (pure Lua)
 --   - Faster table.insert append path
 --   - Per-frame GetTimeCached()
---   - Shared throttle API
---   - Shared table pool
---   - Smart incremental GC manager (combat + idle aware)
---   - Optional protection hooks:
---       * Intercept collectgarbage() calls from other addons
---       * Throttle UpdateAddOnMemoryUsage()
+--   - Shared throttle API, table pool
+--   - Smart incremental GC manager (combat + idle + loading aware)
+--   - SpeedyLoad: event suppression during loading screens
+--   - Optional protection hooks (intercept GC, block memory scans)
+--   - DLL integration (wow_optimize.dll v1.2+)
 -- ================================================================
 
 if _G.LUABOOST_LOADED then return end
 _G.LUABOOST_LOADED = true
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.0.0"
+local ADDON_VERSION = "1.1.0"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -32,15 +31,25 @@ local orig_floor                  = math.floor
 local orig_ceil                   = math.ceil
 local orig_abs                    = math.abs
 local orig_pairs                  = pairs
+local orig_ipairs                 = ipairs
 local orig_type                   = type
 local orig_next                   = next
 local orig_date                   = date
 local orig_print                  = print
+local orig_pcall                  = pcall
+local orig_select                 = select
 local orig_collectgarbage         = collectgarbage
 local orig_UpdateAddOnMemoryUsage = UpdateAddOnMemoryUsage
 local orig_GetAddOnMemoryUsage    = GetAddOnMemoryUsage
 local orig_debugprofilestop       = debugprofilestop
 local orig_min                    = math.min
+local orig_wipe                   = wipe
+local orig_getmetatable           = getmetatable
+local orig_hooksecurefunc         = hooksecurefunc
+local orig_geterrorhandler        = geterrorhandler
+local orig_GetFramesForEvent      = GetFramesRegisteredForEvent
+
+local hasGetFramesForEvent = (orig_type(orig_GetFramesForEvent) == "function")
 
 -- ================================================================
 -- PART A: Runtime Optimizations
@@ -165,7 +174,7 @@ function _G.GetDateCached(fmt, t)
     return cachedDate
 end
 
--- A7. Lua 5.0 compatibility shims (only if missing)
+-- A7. Lua 5.0 compatibility shims
 if not table.getn then table.getn = function(t) return #t end end
 if not table.setn then table.setn = function() end end
 if not table.foreach then
@@ -194,15 +203,18 @@ local defaults = {
     frameStepKB            = 30,
     combatStepKB           = 10,
     idleStepKB             = 100,
+    loadingStepKB          = 200,
     fullCollectThresholdMB = 80,
     idleTimeout            = 15,
     preset                 = "mid",
     debugMode              = false,
 
-    -- Protection (enabled by default as requested)
     interceptGC            = true,
     blockMemoryUsage       = true,
     memoryUsageMinInterval = 1,
+
+    speedyLoadEnabled      = false,
+    speedyLoadMode         = "safe",
 }
 
 local presets = {
@@ -210,6 +222,7 @@ local presets = {
         frameStepKB            = 50,
         combatStepKB           = 5,
         idleStepKB             = 150,
+        loadingStepKB          = 250,
         fullCollectThresholdMB = 50,
         idleTimeout            = 10,
     },
@@ -217,6 +230,7 @@ local presets = {
         frameStepKB            = 30,
         combatStepKB           = 10,
         idleStepKB             = 100,
+        loadingStepKB          = 200,
         fullCollectThresholdMB = 80,
         idleTimeout            = 15,
     },
@@ -224,6 +238,7 @@ local presets = {
         frameStepKB            = 20,
         combatStepKB           = 15,
         idleStepKB             = 200,
+        loadingStepKB          = 300,
         fullCollectThresholdMB = 120,
         idleTimeout            = 20,
     },
@@ -233,6 +248,7 @@ local db
 
 local inCombat     = false
 local isIdle       = false
+local isLoading    = false
 local lastActivity = 0
 
 local allControls = {}
@@ -249,7 +265,7 @@ end
 
 local function DebugMsg(text)
     if db and db.debugMode then
-        orig_print("|cff888888[LuaBoost-GC]|r " .. text)
+        orig_print("|cff888888[LuaBoost-DBG]|r " .. text)
     end
 end
 
@@ -258,7 +274,6 @@ local function InitDB()
         LuaBoostDB = {}
     end
 
-    -- Import legacy SmartGCDB once
     if orig_type(SmartGCDB) == "table" and not LuaBoostDB._migrated then
         for k, v in orig_pairs(SmartGCDB) do
             if defaults[k] ~= nil then
@@ -292,19 +307,17 @@ end
 
 local function GetCurrentStepKB()
     if not db then return 30 end
-    if inCombat then
-        return db.combatStepKB
-    elseif isIdle then
-        return db.idleStepKB
-    else
-        return db.frameStepKB
-    end
+    if isLoading then return db.loadingStepKB end
+    if inCombat then return db.combatStepKB end
+    if isIdle then return db.idleStepKB end
+    return db.frameStepKB
 end
 
 local function GetModeString()
-    if inCombat then return "|cffff4444combat|r"
-    elseif isIdle then return "|cff888888idle|r"
-    else return "|cff44ff44normal|r" end
+    if isLoading then return "|cff4488ffloading|r" end
+    if inCombat then return "|cffff4444combat|r" end
+    if isIdle then return "|cff888888idle|r" end
+    return "|cff44ff44normal|r"
 end
 
 local function RefreshAllControls()
@@ -317,34 +330,41 @@ local function hasDLL()
     return orig_type(LuaBoostC_IsLoaded) == "function"
 end
 
+-- DLL communication globals
+local function WriteCombatGlobal()
+    _G.LUABOOST_ADDON_COMBAT = inCombat
+end
+
+local function WriteIdleGlobal()
+    _G.LUABOOST_ADDON_IDLE = isIdle
+end
+
+local function WriteLoadingGlobal()
+    _G.LUABOOST_ADDON_LOADING = isLoading
+end
+
 -- ================================================================
 -- Protection hooks
 -- ================================================================
-local lastMemUsageUpdate = 0
 
 local function CollectGarbage_Proxy(opt, arg)
     if not db or not db.enabled or not db.interceptGC then
         return orig_collectgarbage(opt, arg)
     end
-
     if opt == "count" then
         return orig_collectgarbage("count")
     end
-
     if opt == nil or opt == "collect" then
         return 0
     end
-
     if opt == "step" then
         local limit = inCombat and 5 or 20
         arg = arg and orig_min(arg, limit) or limit
         return orig_collectgarbage("step", arg)
     end
-
     if opt == "stop" or opt == "restart" or opt == "setpause" or opt == "setstepmul" then
         return 0
     end
-
     return orig_collectgarbage(opt, arg)
 end
 
@@ -365,26 +385,18 @@ end
 local function ApplyProtectionHooks()
     if not db then return end
 
-    -- collectgarbage()
     if db.enabled and db.interceptGC then
         _G.collectgarbage = CollectGarbage_Proxy
     else
         _G.collectgarbage = orig_collectgarbage
     end
 
-    -- AddOn memory APIs
     if db.enabled and db.blockMemoryUsage then
         _G.UpdateAddOnMemoryUsage = UpdateAddOnMemoryUsage_Proxy
         _G.GetAddOnMemoryUsage    = GetAddOnMemoryUsage_Proxy
     else
         _G.UpdateAddOnMemoryUsage = orig_UpdateAddOnMemoryUsage
         _G.GetAddOnMemoryUsage    = orig_GetAddOnMemoryUsage
-    end
-
-    if db.debugMode then
-        orig_print("|cff888888[LuaBoost-GC]|r Hooks: " ..
-            "collectgarbage=" .. ((db.enabled and db.interceptGC) and "proxy" or "orig") ..
-            ", AddOnMemory=" .. ((db.enabled and db.blockMemoryUsage) and "blocked" or "orig"))
     end
 end
 
@@ -402,12 +414,14 @@ gcFrame:SetScript("OnUpdate", function()
     if not db or not db.enabled then return end
 
     -- Idle detection
-    if not isIdle and (orig_GetTime() - lastActivity) > db.idleTimeout then
+    if not isIdle and not inCombat and not isLoading
+       and (orig_GetTime() - lastActivity) > db.idleTimeout then
         isIdle = true
+        WriteIdleGlobal()
         DebugMsg("Idle mode activated")
     end
 
-    -- Every ~5 seconds: re-stop GC + re-apply protection hooks
+    -- Periodic: re-stop GC + re-apply protection hooks
     gcReStopCounter = gcReStopCounter + 1
     if gcReStopCounter >= 300 then
         gcReStopCounter = 0
@@ -415,9 +429,9 @@ gcFrame:SetScript("OnUpdate", function()
         ApplyProtectionHooks()
     end
 
-    -- Emergency full GC (not in combat)
+    -- Emergency full GC (not in combat, not loading)
     local memKB = orig_collectgarbage("count")
-    if memKB > (db.fullCollectThresholdMB * 1024) and not inCombat then
+    if memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading then
         local t0 = orig_debugprofilestop()
         orig_collectgarbage("collect")
         orig_collectgarbage("collect")
@@ -456,9 +470,9 @@ combatFrame:SetScript("OnEvent", function(self, event)
     if event == "PLAYER_REGEN_DISABLED" then
         inCombat = true
         lastActivity = orig_GetTime()
-        isIdle = false
+        if isIdle then isIdle = false; WriteIdleGlobal() end
+        WriteCombatGlobal()
 
-        _G.LUABOOST_ADDON_COMBAT = true
         if hasDLL() and LuaBoostC_SetCombat then
             LuaBoostC_SetCombat(true)
         end
@@ -466,8 +480,8 @@ combatFrame:SetScript("OnEvent", function(self, event)
     elseif event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
         lastActivity = orig_GetTime()
+        WriteCombatGlobal()
 
-        _G.LUABOOST_ADDON_COMBAT = false
         if hasDLL() and LuaBoostC_SetCombat then
             LuaBoostC_SetCombat(false)
         end
@@ -498,31 +512,302 @@ for _, event in orig_pairs(activityEvents) do
 end
 activityFrame:SetScript("OnEvent", function()
     lastActivity = orig_GetTime()
-    if isIdle then isIdle = false end
-end)
-
--- Zone/loading GC
-local zoneFrame = CreateFrame("Frame")
-zoneFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-zoneFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
-zoneFrame:SetScript("OnEvent", function()
-    if not db or not db.enabled then return end
-
-    if hasDLL() and LuaBoostC_GCCollect then
-        LuaBoostC_GCCollect()
-    else
-        orig_collectgarbage("collect")
-        orig_collectgarbage("collect")
-    end
-
-    gcStats.fullCollects = gcStats.fullCollects + 1
-    lastActivity = orig_GetTime()
-    isIdle = false
-    orig_collectgarbage("stop")
+    if isIdle then isIdle = false; WriteIdleGlobal() end
 end)
 
 -- ================================================================
--- PART C: Benchmark
+-- PART C: SpeedyLoad — Event Suppression During Loading Screens
+--
+-- Approach from KPack/SpeedyLoad (Kader):
+--   Uses GetFramesRegisteredForEvent() to target specific frames.
+--   Hooks UnregisterEvent to track removals during loading.
+--   Replays events that fired during loading after restore.
+-- ================================================================
+
+-- Safe events: cosmetic, never cause issues
+local SPEEDY_SAFE_EVENTS = {
+    "SPELLS_CHANGED",
+    "SPELL_UPDATE_USABLE",
+    "ACTIONBAR_SLOT_CHANGED",
+    "USE_GLYPH",
+    "PLAYER_TALENT_UPDATE",
+    "PET_TALENT_UPDATE",
+    "WORLD_MAP_UPDATE",
+    "UPDATE_WORLD_STATES",
+    "UPDATE_FACTION",
+    "CRITERIA_UPDATE",
+    "RECEIVED_ACHIEVEMENT_LIST",
+}
+
+-- Aggressive: includes more actionbar/inventory/aura events
+local SPEEDY_AGGRESSIVE_EVENTS = {}
+do
+    local safe = SPEEDY_SAFE_EVENTS
+    for i = 1, #safe do
+        SPEEDY_AGGRESSIVE_EVENTS[#SPEEDY_AGGRESSIVE_EVENTS + 1] = safe[i]
+    end
+    local extra = {
+        "ACTIONBAR_UPDATE_STATE",
+        "ACTIONBAR_UPDATE_USABLE",
+        "ACTIONBAR_UPDATE_COOLDOWN",
+        "SPELL_UPDATE_COOLDOWN",
+        "UNIT_AURA",
+        "UNIT_INVENTORY_CHANGED",
+        "BAG_UPDATE",
+        "QUEST_LOG_UPDATE",
+        "COMPANION_UPDATE",
+        "PET_BAR_UPDATE",
+        "TRADE_SKILL_UPDATE",
+        "MERCHANT_UPDATE",
+    }
+    for i = 1, #extra do
+        SPEEDY_AGGRESSIVE_EVENTS[#SPEEDY_AGGRESSIVE_EVENTS + 1] = extra[i]
+    end
+end
+
+-- SpeedyLoad state
+local speedyTracked    = {}     -- { [event] = { [frame] = 1 } }
+local speedyOccurred   = {}     -- { [event] = true }
+local speedySuppressed = false
+local speedyListenUnreg = false
+local speedyHooked     = false
+
+-- Frame that "catches" tracked events during loading
+local speedyFrame = hasGetFramesForEvent and CreateFrame("Frame") or nil
+
+-- Cache of validated UnregisterEvent functions
+local speedyValidUnreg = {}
+if speedyFrame then
+    speedyValidUnreg[speedyFrame.UnregisterEvent] = true
+end
+
+local function GetSpeedyEventList()
+    if db and db.speedyLoadMode == "aggressive" then
+        return SPEEDY_AGGRESSIVE_EVENTS
+    end
+    return SPEEDY_SAFE_EVENTS
+end
+
+local function SpeedyLoad_Suppress()
+    if not hasGetFramesForEvent or not speedyFrame then return 0 end
+
+    -- Build tracking table for current event list
+    for k in orig_pairs(speedyTracked) do speedyTracked[k] = nil end
+    orig_wipe(speedyOccurred)
+
+    local eventList = GetSpeedyEventList()
+    for i = 1, #eventList do
+        speedyTracked[eventList[i]] = {}
+    end
+
+    local count = 0
+
+    for event, frames in orig_pairs(speedyTracked) do
+        -- Unregister all other frames from this event
+        for i = 1, orig_select("#", orig_GetFramesForEvent(event)) do
+            local frame = orig_select(i, orig_GetFramesForEvent(event))
+            if frame and frame ~= speedyFrame then
+                local unreg = frame.UnregisterEvent
+                if unreg then
+                    orig_pcall(unreg, frame, event)
+                    frames[frame] = 1
+                    count = count + 1
+                end
+            end
+        end
+        -- Register on our frame to detect if event fires during loading
+        speedyFrame:RegisterEvent(event)
+    end
+
+    speedySuppressed = true
+    speedyListenUnreg = true
+    return count
+end
+
+local function SpeedyLoad_Restore()
+    if not speedySuppressed then return 0 end
+
+    speedyListenUnreg = false
+    speedySuppressed = false
+
+    local count = 0
+
+    for event, frames in orig_pairs(speedyTracked) do
+        -- Stop listening on our frame
+        if speedyFrame then
+            orig_pcall(speedyFrame.UnregisterEvent, speedyFrame, event)
+        end
+
+        for frame in orig_pairs(frames) do
+            orig_pcall(frame.RegisterEvent, frame, event)
+            count = count + 1
+
+            -- Replay event if it occurred during loading
+            if speedyOccurred[event] then
+                local OnEvent = frame:GetScript("OnEvent")
+                if OnEvent then
+                    local a1 = (event == "ACTIONBAR_SLOT_CHANGED") and 0 or nil
+                    local ok, err = orig_pcall(OnEvent, frame, event, a1)
+                    if not ok then
+                        orig_geterrorhandler()(err, 1)
+                    end
+                end
+            end
+        end
+        orig_wipe(frames)
+    end
+
+    orig_wipe(speedyOccurred)
+    return count
+end
+
+-- SpeedyLoad frame catches tracked events during loading
+if speedyFrame then
+    speedyFrame:SetScript("OnEvent", function(self, event)
+        if speedyTracked[event] then
+            speedyOccurred[event] = true
+            self:UnregisterEvent(event)
+        end
+    end)
+end
+
+-- Hook UnregisterEvent on Frame metatable
+-- If an addon unregisters from a tracked event during loading,
+-- we remove it from our tracking (so we don't re-register it)
+local function SpeedyLoad_HookUnregister()
+    if speedyHooked or not speedyFrame then return end
+
+    local meta = orig_getmetatable(speedyFrame)
+    if not meta or not meta.__index then return end
+
+    local ok = orig_pcall(orig_hooksecurefunc, meta.__index, "UnregisterEvent",
+        function(frame, event)
+            if speedyListenUnreg then
+                local frames = speedyTracked[event]
+                if frames then
+                    frames[frame] = nil
+                end
+            end
+        end
+    )
+
+    if ok then
+        speedyHooked = true
+        DebugMsg("SpeedyLoad: UnregisterEvent hook installed")
+    end
+end
+
+-- Ensure our PLAYER_ENTERING_WORLD handler fires first
+-- (unregister from all, register ours, re-register others)
+local loadFrame -- forward declaration
+
+local function SpeedyLoad_EnsurePriority()
+    if not hasGetFramesForEvent or not loadFrame then return end
+
+    local frames = {orig_GetFramesForEvent("PLAYER_ENTERING_WORLD")}
+    for i = 1, #frames do
+        orig_pcall(frames[i].UnregisterEvent, frames[i], "PLAYER_ENTERING_WORLD")
+    end
+
+    -- Register ours first
+    loadFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+
+    -- Re-register others after ours
+    for i = 1, #frames do
+        if frames[i] ~= loadFrame then
+            orig_pcall(frames[i].RegisterEvent, frames[i], "PLAYER_ENTERING_WORLD")
+        end
+    end
+
+    -- Blizzard bug: PetStableFrame shouldn't listen to SPELLS_CHANGED
+    if PetStableFrame then
+        orig_pcall(PetStableFrame.UnregisterEvent, PetStableFrame, "SPELLS_CHANGED")
+    end
+
+    DebugMsg("SpeedyLoad: PLAYER_ENTERING_WORLD priority set")
+end
+
+-- ================================================================
+-- Loading state frame
+-- Manages isLoading + triggers SpeedyLoad suppress/restore
+-- ================================================================
+loadFrame = CreateFrame("Frame")
+loadFrame:RegisterEvent("PLAYER_LEAVING_WORLD")
+loadFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+loadFrame:RegisterEvent("LOADING_SCREEN_ENABLED")
+loadFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
+loadFrame:SetScript("OnEvent", function(self, event)
+
+    if event == "PLAYER_LEAVING_WORLD" then
+        isLoading = true
+        WriteLoadingGlobal()
+
+        if db and db.speedyLoadEnabled then
+            local n = SpeedyLoad_Suppress()
+            DebugMsg(orig_format("SpeedyLoad: suppressed %d registrations (%s)",
+                n, db.speedyLoadMode))
+        end
+
+    elseif event == "LOADING_SCREEN_ENABLED" then
+        -- Safety: set loading state if PLAYER_LEAVING_WORLD didn't fire
+        if not isLoading then
+            isLoading = true
+            WriteLoadingGlobal()
+        end
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Restore suppressed events (must happen before other addons process this event)
+        if speedySuppressed then
+            local n = SpeedyLoad_Restore()
+            DebugMsg(orig_format("SpeedyLoad: restored %d registrations", n))
+        end
+
+        isLoading = false
+        WriteLoadingGlobal()
+        lastActivity = orig_GetTime()
+        if isIdle then isIdle = false; WriteIdleGlobal() end
+
+        -- Post-loading full GC
+        if db and db.enabled then
+            if hasDLL() and LuaBoostC_GCCollect then
+                LuaBoostC_GCCollect()
+            else
+                orig_collectgarbage("collect")
+                orig_collectgarbage("collect")
+            end
+            gcStats.fullCollects = gcStats.fullCollects + 1
+            orig_collectgarbage("stop")
+        end
+
+    elseif event == "LOADING_SCREEN_DISABLED" then
+        -- Safety: restore if PLAYER_ENTERING_WORLD hasn't fired yet
+        if speedySuppressed then
+            local n = SpeedyLoad_Restore()
+            DebugMsg(orig_format("SpeedyLoad: restored %d registrations (fallback)", n))
+        end
+
+        if isLoading then
+            isLoading = false
+            WriteLoadingGlobal()
+            lastActivity = orig_GetTime()
+            if isIdle then isIdle = false; WriteIdleGlobal() end
+
+            if db and db.enabled then
+                if hasDLL() and LuaBoostC_GCCollect then
+                    LuaBoostC_GCCollect()
+                else
+                    orig_collectgarbage("collect")
+                    orig_collectgarbage("collect")
+                end
+                gcStats.fullCollects = gcStats.fullCollects + 1
+                orig_collectgarbage("stop")
+            end
+        end
+    end
+end)
+
+-- ================================================================
+-- PART D: Benchmark
 -- ================================================================
 local function RunBenchmark()
     local N = 1000000
@@ -582,7 +867,7 @@ local function RunBenchmark()
 end
 
 -- ================================================================
--- PART D: GUI (Interface Options)
+-- PART E: GUI (Interface Options)
 -- ================================================================
 local function Label(parent, text, x, y, template)
     local fs = parent:CreateFontString(nil, "ARTWORK", template or "GameFontHighlight")
@@ -661,8 +946,7 @@ panelMain:SetScript("OnShow", function(self)
 
     Label(self, ADDON_COLOR .. "LuaBoost|r v" .. ADDON_VERSION, 16, -16, "GameFontNormalLarge")
 
-    local desc = Label(self, "Lua runtime optimizer + smart garbage collector for WoW 3.3.5a.", 16, -36, "GameFontHighlightSmall")
-    desc:SetWidth(450)
+    Label(self, "Lua runtime optimizer + smart garbage collector for WoW 3.3.5a.", 16, -36, "GameFontHighlightSmall")
 
     local statusLabel = Label(self, "", 16, -56, "GameFontNormal")
     statusLabel:SetWidth(500)
@@ -719,7 +1003,56 @@ panelMain:SetScript("OnShow", function(self)
         end)
     end
 
-    Label(self, "Runtime optimizations are always active.", 16, -140, "GameFontHighlightSmall")
+    Label(self, "Runtime optimizations are always active.", 16, -138, "GameFontHighlightSmall")
+
+    -- SpeedyLoad section
+    Label(self, "Loading Screen Optimization", 16, -170, "GameFontNormal")
+
+    Checkbox(self, "Enable Fast Loading Screens",
+        "Temporarily suppresses noisy events during loading screens.\n"
+        .. "Reduces CPU work and speeds up zone transitions.\n"
+        .. "Restores all events after loading completes.",
+        14, -190,
+        function() return db.speedyLoadEnabled end,
+        function(v) db.speedyLoadEnabled = v end
+    )
+
+    local speedyModeLabel = Label(self, "", 16, -218, "GameFontHighlightSmall")
+    speedyModeLabel:SetWidth(300)
+
+    local function UpdateSpeedyModeLabel()
+        if not db then return end
+        if db.speedyLoadMode == "aggressive" then
+            speedyModeLabel:SetText("Mode: |cffff8844Aggressive|r (" .. #SPEEDY_AGGRESSIVE_EVENTS .. " events)")
+        else
+            speedyModeLabel:SetText("Mode: |cff44ff44Safe|r (" .. #SPEEDY_SAFE_EVENTS .. " events)")
+        end
+    end
+
+    local safeBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
+    safeBtn:SetSize(100, 22)
+    safeBtn:SetPoint("TOPLEFT", 100, -188)
+    safeBtn:SetText("|cff44ff44Safe|r")
+    safeBtn:SetScript("OnClick", function()
+        db.speedyLoadMode = "safe"
+        UpdateSpeedyModeLabel()
+    end)
+
+    local aggBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
+    aggBtn:SetSize(100, 22)
+    aggBtn:SetPoint("TOPLEFT", 405, -188)
+    aggBtn:SetText("|cffff8844Aggressive|r")
+    aggBtn:SetScript("OnClick", function()
+        db.speedyLoadMode = "aggressive"
+        UpdateSpeedyModeLabel()
+    end)
+
+    UpdateSpeedyModeLabel()
+
+    if not hasGetFramesForEvent then
+        Label(self, "|cffff4444GetFramesRegisteredForEvent not available — SpeedyLoad disabled.|r",
+            16, -238, "GameFontHighlightSmall")
+    end
 end)
 
 InterfaceOptions_AddCategory(panelMain)
@@ -743,7 +1076,7 @@ panelSettings:SetScript("OnShow", function(self)
         function(v) db.frameStepKB = v; db.preset = "custom" end
     )
 
-    Slider(self, "Combat Step", "GC per frame in combat.", 20, -138, 0, 50, 1,
+    Slider(self, "Combat Step", "GC per frame in combat (keep low to protect frametime).", 20, -138, 0, 50, 1,
         function() return db.combatStepKB end,
         function(v) db.combatStepKB = v; db.preset = "custom" end
     )
@@ -753,14 +1086,19 @@ panelSettings:SetScript("OnShow", function(self)
         function(v) db.idleStepKB = v; db.preset = "custom" end
     )
 
-    Label(self, "Thresholds", 16, -244, "GameFontNormal")
+    Slider(self, "Loading Step", "GC per frame during loading screens (no rendering).", 20, -242, 50, 500, 25,
+        function() return db.loadingStepKB end,
+        function(v) db.loadingStepKB = v; db.preset = "custom" end
+    )
 
-    Slider(self, "Emergency Full GC (MB)", "Force full GC outside combat.", 20, -274, 20, 300, 10,
+    Label(self, "Thresholds", 16, -296, "GameFontNormal")
+
+    Slider(self, "Emergency Full GC (MB)", "Force full GC outside combat when memory exceeds this.", 20, -326, 20, 300, 10,
         function() return db.fullCollectThresholdMB end,
         function(v) db.fullCollectThresholdMB = v; db.preset = "custom" end
     )
 
-    Slider(self, "Idle Timeout (sec)", "Seconds without activity before idle mode.", 20, -326, 5, 120, 5,
+    Slider(self, "Idle Timeout (sec)", "Seconds without activity before idle mode.", 20, -378, 5, 120, 5,
         function() return db.idleTimeout end,
         function(v) db.idleTimeout = v end
     )
@@ -781,21 +1119,21 @@ panelTools:SetScript("OnShow", function(self)
     Label(self, ADDON_COLOR .. "Tools & Diagnostics|r", 16, -16, "GameFontNormalLarge")
 
     Checkbox(self, "Debug mode (GC info in chat)",
-        "Shows GC mode changes and emergency collections.",
+        "Shows GC mode changes, SpeedyLoad activity, and emergency collections.",
         14, -40,
         function() return db.debugMode end,
         function(v) db.debugMode = v end
     )
 
     Checkbox(self, "Intercept collectgarbage() calls",
-        "Blocks full GC calls triggered by other addons.\nIf UI blocking/taint appears, disable this option.",
+        "Blocks full GC calls triggered by other addons.\nDisable if you see taint warnings.",
         14, -66,
         function() return db.interceptGC end,
         function(v) db.interceptGC = v and true or false; ApplyProtectionHooks() end
     )
 
-    Checkbox(self, "Throttle UpdateAddOnMemoryUsage()",
-        "Throttles heavy addon memory scans.\nIf UI blocking/taint appears, disable this option.",
+    Checkbox(self, "Block UpdateAddOnMemoryUsage()",
+        "Blocks heavy addon memory scans.\nDisable if you see taint warnings.",
         14, -92,
         function() return db.blockMemoryUsage end,
         function(v) db.blockMemoryUsage = v and true or false; ApplyProtectionHooks() end
@@ -863,7 +1201,7 @@ end)
 InterfaceOptions_AddCategory(panelTools)
 
 -- ================================================================
--- PART E: Slash Commands
+-- PART F: Slash Commands
 -- ================================================================
 local function ShowStatus()
     orig_print(ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION)
@@ -871,9 +1209,13 @@ local function ShowStatus()
         orig_print(orig_format("  GC: %s | Mode: %s | Mem: %.1f MB | Step: %d KB/f",
             db.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r",
             GetModeString(), GetMemoryMB(), GetCurrentStepKB()))
-        orig_print(orig_format("  Protection: interceptGC=%s, blockMemoryUsage=%s",
+        orig_print(orig_format("  Protection: interceptGC=%s, blockMemUsage=%s",
             db.interceptGC and "on" or "off",
             db.blockMemoryUsage and "on" or "off"))
+        orig_print(orig_format("  SpeedyLoad: %s (%s, %d events)",
+            db.speedyLoadEnabled and "|cff00ff00ON|r" or "|cffaaaaaaOFF|r",
+            db.speedyLoadMode,
+            #GetSpeedyEventList()))
     end
     if hasDLL() then
         orig_print("  wow_optimize.dll: |cff00ff00CONNECTED|r")
@@ -887,7 +1229,7 @@ SLASH_LUABOOST1 = "/luaboost"
 SLASH_LUABOOST2 = "/lb"
 SlashCmdList["LUABOOST"] = function(input)
     if not db then InitDB() end
-    input = (input or ""):lower()
+    input = (input or ""):lower():trim()
 
     if input == "bench" or input == "benchmark" then
         RunBenchmark()
@@ -899,13 +1241,14 @@ SlashCmdList["LUABOOST"] = function(input)
         orig_print(orig_format("  Mode: %s | Step: %d KB/f", GetModeString(), GetCurrentStepKB()))
         orig_print(orig_format("  Lua steps: %d | Emergency: %d | Full: %d",
             gcStats.stepsLua, gcStats.emergencyGC, gcStats.fullCollects))
+        orig_print(orig_format("  Loading: %s | Idle: %s | Combat: %s",
+            isLoading and "yes" or "no", isIdle and "yes" or "no", inCombat and "yes" or "no"))
 
         if hasDLL() and LuaBoostC_GetStats then
-            local mem, steps, fulls, pause, stepmul, combat = LuaBoostC_GetStats()
+            local mem, steps, fulls, pause, stepmul, combat, mode, idle, loading = LuaBoostC_GetStats()
             if mem then
-                orig_print(orig_format("  DLL: mem=%.0f KB steps=%d full=%d pause=%d stepmul=%d combat=%s",
-                    mem or 0, steps or 0, fulls or 0, pause or 0, stepmul or 0,
-                    combat and "yes" or "no"))
+                orig_print(orig_format("  DLL: mem=%.0fKB steps=%d full=%d mode=%s",
+                    mem or 0, steps or 0, fulls or 0, mode or "?"))
             end
         end
 
@@ -933,26 +1276,45 @@ SlashCmdList["LUABOOST"] = function(input)
         gcStats.fullCollects = gcStats.fullCollects + 1
         orig_collectgarbage("stop")
 
+    elseif input == "sl" or input == "speedyload" then
+        db.speedyLoadEnabled = not db.speedyLoadEnabled
+        Msg("SpeedyLoad: " .. (db.speedyLoadEnabled and "|cff00ff00ON|r" or "|cffff0000OFF|r")
+            .. " (" .. db.speedyLoadMode .. ", " .. #GetSpeedyEventList() .. " events)")
+
+    elseif input == "sl safe" or input == "speedyload safe" then
+        db.speedyLoadEnabled = true
+        db.speedyLoadMode = "safe"
+        Msg("SpeedyLoad: |cff00ff00ON|r (|cff44ff44safe|r, " .. #SPEEDY_SAFE_EVENTS .. " events)")
+
+    elseif input == "sl agg" or input == "sl aggressive"
+        or input == "speedyload aggressive" then
+        db.speedyLoadEnabled = true
+        db.speedyLoadMode = "aggressive"
+        Msg("SpeedyLoad: |cff00ff00ON|r (|cffff8844aggressive|r, " .. #SPEEDY_AGGRESSIVE_EVENTS .. " events)")
+
     elseif input == "settings" then
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
 
     elseif input == "help" then
         orig_print(ADDON_COLOR .. "[LuaBoost]|r Commands:")
-        orig_print("  /lb           — status")
-        orig_print("  /lb bench     — benchmark")
-        orig_print("  /lb gc        — GC stats")
-        orig_print("  /lb pool      — table pool stats")
-        orig_print("  /lb toggle    — enable/disable GC manager")
-        orig_print("  /lb force     — force full GC now")
-        orig_print("  /lb settings  — open GC settings")
+        orig_print("  /lb              — status")
+        orig_print("  /lb bench        — benchmark")
+        orig_print("  /lb gc           — GC stats")
+        orig_print("  /lb pool         — table pool stats")
+        orig_print("  /lb toggle       — enable/disable GC manager")
+        orig_print("  /lb force        — force full GC now")
+        orig_print("  /lb sl           — toggle SpeedyLoad")
+        orig_print("  /lb sl safe      — SpeedyLoad safe mode")
+        orig_print("  /lb sl agg       — SpeedyLoad aggressive mode")
+        orig_print("  /lb settings     — open GC settings")
     else
         ShowStatus()
     end
 end
 
 -- ================================================================
--- PART F: Initialization
+-- PART G: Initialization
 -- ================================================================
 local initFrame = CreateFrame("Frame")
 initFrame:RegisterEvent("ADDON_LOADED")
@@ -967,6 +1329,10 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
         lastActivity = orig_GetTime()
         cachedTime   = orig_GetTime()
 
+        _G.LUABOOST_ADDON_COMBAT  = false
+        _G.LUABOOST_ADDON_IDLE    = false
+        _G.LUABOOST_ADDON_LOADING = false
+
         if db.enabled then
             orig_collectgarbage("stop")
         end
@@ -980,17 +1346,31 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
             ApplyProtectionHooks()
             lastActivity = orig_GetTime()
             cachedTime   = orig_GetTime()
+            _G.LUABOOST_ADDON_COMBAT  = false
+            _G.LUABOOST_ADDON_IDLE    = false
+            _G.LUABOOST_ADDON_LOADING = false
             if db.enabled then orig_collectgarbage("stop") end
         end
 
+        -- SpeedyLoad: hook UnregisterEvent and ensure priority
+        SpeedyLoad_HookUnregister()
+        SpeedyLoad_EnsurePriority()
+
+        -- Login message
         local parts = {}
         parts[#parts + 1] = ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION
-        parts[#parts + 1] = db.enabled and ("GC:" .. VALUE_COLOR .. (db.preset or "custom") .. "|r") or "GC:|cffff0000OFF|r"
+        parts[#parts + 1] = db.enabled
+            and ("GC:" .. VALUE_COLOR .. (db.preset or "custom") .. "|r")
+            or "GC:|cffff0000OFF|r"
+        if db.speedyLoadEnabled then
+            parts[#parts + 1] = "SL:|cff00ff00" .. db.speedyLoadMode .. "|r"
+        end
         if hasDLL() then parts[#parts + 1] = "|cff00ff00DLL|r" end
         parts[#parts + 1] = VALUE_COLOR .. "/lb|r help"
         orig_print(table.concat(parts, " | "))
 
-        if orig_type(SmartGCDB) == "table" or (IsAddOnLoaded and (IsAddOnLoaded("SmartGC") or IsAddOnLoaded("!SmartGC"))) then
+        if orig_type(SmartGCDB) == "table"
+            or (IsAddOnLoaded and (IsAddOnLoaded("SmartGC") or IsAddOnLoaded("!SmartGC"))) then
             orig_print(ADDON_COLOR .. "[LuaBoost]|r |cffff8844WARNING:|r SmartGC detected. Disable SmartGC to avoid conflicts.")
         end
     end
