@@ -1,4 +1,4 @@
-# ⚡ LuaBoost v1.2.0 (WotLK 3.3.5a)
+# ⚡ LuaBoost v1.2.1 (WotLK 3.3.5a)
 
 **Lua runtime optimizer + SmartGC + SpeedyLoad for World of Warcraft 3.3.5a (build 12340)**
 Author: **Suprematist**
@@ -19,7 +19,7 @@ Designed for **Warmane** and other 3.3.5a servers.
 - Table pool: `LuaBoost_AcquireTable()` / `LuaBoost_ReleaseTable(t)` / `LuaBoost_GetPoolStats()`
 - `GetDateCached(fmt)` — opt-in cached date helper (does **not** replace global `date()`)
 
-### Math Auto-Detect (v1.2.0)
+### Math Auto-Detect (v1.2.1)
 On first login, LuaBoost runs a quick micro-benchmark (200k iterations) to test whether its pure-Lua math replacements are actually faster than the original C implementations on **your specific CPU**.
 
 - If a fast replacement is **slower** (beyond 5% tolerance) → **reverts to original** automatically
@@ -67,15 +67,13 @@ Works with **[wow_optimize.dll](https://github.com/suprepupre/wow-optimize)**:
 
 ---
 
-## 🆕 What's New in v1.2.0
+## 🆕 What's New in v1.2.1
 
-| Feature | Description |
-|---------|-------------|
-| **Math Auto-Detect** | Benchmarks math replacements on first login. Reverts to original if fast version is slower on your CPU. Cached in SavedVariables. |
-| **Fixed Benchmark Output** | `/lb bench` now correctly shows "X% faster" (green) or "X% slower" (red) instead of always saying "faster" |
-| **Expanded Slider Ranges** | All GC sliders support higher values for heavy addon setups |
-| **Rebalanced Presets** | Weak/Mid/Strong presets fixed — old values were inverted and had too-low emergency thresholds |
-| **New Commands** | `/lb math`, `/lb mathbench` |
+- fix(LuaBoost): correct GC timing and add teleport guard
+- Fix debugprofilestop without debugprofilestart in force GC button
+- Add 2-second guard to prevent double full GC on teleport
+- Cap emergency threshold auto-raise at 1000 MB
+
 
 ---
 

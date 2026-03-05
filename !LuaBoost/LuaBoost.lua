@@ -1,28 +1,8 @@
--- ================================================================
---  LuaBoost v1.2.0 — WoW 3.3.5a Lua Runtime Optimizer
---  Author: Suprematist
---
---  Features:
---   - Faster math.floor/ceil/abs (pure Lua, auto-detect)
---   - Faster table.insert append path
---   - Per-frame GetTimeCached()
---   - Shared throttle API, table pool
---   - Smart incremental GC manager (combat + idle + loading aware)
---   - SpeedyLoad: event suppression during loading screens
---   - Optional protection hooks (intercept GC, block memory scans)
---   - DLL integration (wow_optimize.dll v1.2+)
---
---  v1.2.0 changes:
---   - Auto-detect math optimizations (bench on first run, cache result)
---   - Fixed benchmark output (shows "faster" or "slower" correctly)
---   - Expanded UI slider ranges for heavy addon setups
--- ================================================================
-
 if _G.LUABOOST_LOADED then return end
 _G.LUABOOST_LOADED = true
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.2.0"
+local ADDON_VERSION = "1.2.1"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
