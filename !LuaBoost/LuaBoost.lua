@@ -519,7 +519,7 @@ burstFrame:SetScript("OnEvent", function(self, event)
 
     local burstKB = 128
 
-    DebugMsg(orig_format("GC burst: %s (step %d KB)", event, burstKB))
+    DebugMsg(orig_format(L["GC burst: %s (step %d KB)"], event, burstKB))
 
     if hasDLL() and LuaBoostC_GCStep then
         LuaBoostC_GCStep(burstKB)
@@ -778,7 +778,7 @@ loadFrame:SetScript("OnEvent", function(self, event)
 
         if db and db.speedyLoadEnabled then
             local n = SpeedyLoad_Suppress()
-            DebugMsg(orig_format("SpeedyLoad: suppressed %d registrations (%s)", n, db.speedyLoadMode))
+            DebugMsg(orig_format(L["SpeedyLoad: suppressed %d registrations (%s)"], n, db.speedyLoadMode))
         end
 
     elseif event == "LOADING_SCREEN_ENABLED" then
@@ -790,7 +790,7 @@ loadFrame:SetScript("OnEvent", function(self, event)
     elseif event == "PLAYER_ENTERING_WORLD" then
         if speedySuppressed then
             local n = SpeedyLoad_Restore()
-            DebugMsg(orig_format("SpeedyLoad: restored %d registrations", n))
+            DebugMsg(orig_format(L["SpeedyLoad: restored %d registrations"], n))
         end
 
         isLoading = false
@@ -806,7 +806,7 @@ loadFrame:SetScript("OnEvent", function(self, event)
     elseif event == "LOADING_SCREEN_DISABLED" then
         if speedySuppressed then
             local n = SpeedyLoad_Restore()
-            DebugMsg(orig_format("SpeedyLoad: restored %d registrations (fallback)", n))
+            DebugMsg(orig_format(L["SpeedyLoad: restored %d registrations (fallback)"], n))
         end
 
         if isLoading then
@@ -884,11 +884,11 @@ local function InstallThrashGuard()
     local barMT = orig_getmetatable(tmpBar)
 
     if not fsMT or not fsMT.__index then
-        DebugMsg("ThrashGuard: FontString metatable not found")
+        DebugMsg(L["ThrashGuard: FontString metatable not found"])
         return
     end
     if not barMT or not barMT.__index then
-        DebugMsg("ThrashGuard: StatusBar metatable not found")
+        DebugMsg(L["ThrashGuard: StatusBar metatable not found"])
         return
     end
 
@@ -929,7 +929,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: FontString:SetText hooked")
+            DebugMsg(L["ThrashGuard: FontString:SetText hooked"])
         else
             fsMeta.SetText = orig
         end
@@ -979,7 +979,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: FontString:SetFormattedText hooked")
+            DebugMsg(L["ThrashGuard: FontString:SetFormattedText hooked"])
         else
             fsMeta.SetFormattedText = originals.FS_SetFormattedText
         end
@@ -1016,7 +1016,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: FontString:SetTextColor hooked")
+            DebugMsg(L["ThrashGuard: FontString:SetTextColor hooked"])
         else
             fsMeta.SetTextColor = orig
         end
@@ -1049,7 +1049,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: StatusBar:SetValue hooked")
+            DebugMsg(L["ThrashGuard: StatusBar:SetValue hooked"])
         else
             barMeta.SetValue = orig
         end
@@ -1084,7 +1084,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: StatusBar:SetMinMaxValues hooked")
+            DebugMsg(L["ThrashGuard: StatusBar:SetMinMaxValues hooked"])
         else
             barMeta.SetMinMaxValues = orig
         end
@@ -1121,7 +1121,7 @@ local function InstallThrashGuard()
 
         if ok then
             hookCount = hookCount + 1
-            DebugMsg("ThrashGuard: StatusBar:SetStatusBarColor hooked")
+            DebugMsg(L["ThrashGuard: StatusBar:SetStatusBarColor hooked"])
         else
             barMeta.SetStatusBarColor = orig
         end
@@ -1130,7 +1130,7 @@ local function InstallThrashGuard()
     -- ============================================================
     thrashStats.hooked = hookCount
     thrashStats.active = true
-    DebugMsg(orig_format("ThrashGuard: installed %d/6 hooks", hookCount))
+    DebugMsg(orig_format(L["ThrashGuard: installed %d/6 hooks"], hookCount))
 end
 
 -- ----------------------------------------------------------------
@@ -1155,7 +1155,7 @@ local function UninstallThrashGuard()
 
     thrashStats.active = false
     thrashStats.hooked = 0
-    DebugMsg("ThrashGuard: all hooks removed")
+    DebugMsg(L["ThrashGuard: all hooks removed"])
 end
 
 -- ----------------------------------------------------------------
@@ -1310,7 +1310,7 @@ panelMain:SetScript("OnShow", function(self)
 
     for _, p in orig_pairs(pdata) do
         local b = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-        b:SetSize(115, 22)
+        b:SetSize(120, 22)
         b:SetPoint("TOPLEFT", p.x, -130)
         b:SetText(p.l)
         b:SetScript("OnClick", function()
@@ -1400,10 +1400,10 @@ panelMain:SetScript("OnShow", function(self)
             local total = sk + ps
             local rate = total > 0 and (sk / total * 100) or 0
             tgStatsLabel:SetText(orig_format(
-                "ThrashGuard: |cff00ff00%d|r hooks | Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r | Rate: |cff00ff00%.0f%%|r",
+                L["ThrashGuard: |cff00ff00%d|r hooks | Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r | Rate: |cff00ff00%.0f%%|r",]
                 thrashStats.hooked, sk, ps, rate))
         else
-            tgStatsLabel:SetText("ThrashGuard: |cffaaaaaaInactive|r")
+            tgStatsLabel:SetText(L["ThrashGuard: |cffaaaaaaInactive|r"])
         end
     end)    
 end)
@@ -1598,10 +1598,10 @@ local function ShowStatus()
     if thrashStats.active then
         local sk, ps = thrashStats.skipped, thrashStats.passed
         local rate = (sk + ps) > 0 and (sk / (sk + ps) * 100) or 0
-        orig_print(orig_format("  ThrashGuard: |cff00ff00ACTIVE|r (%d hooks, %.0f%% skip rate)",
+        orig_print(orig_format(L["  ThrashGuard: |cff00ff00ACTIVE|r (%d hooks, %.0f%% skip rate)"],
             thrashStats.hooked, rate))
     else
-        orig_print("  ThrashGuard: |cffaaaaaaOFF|r")
+        orig_print(L["  ThrashGuard: |cffaaaaaaOFF|r"])
     end
 
     orig_print("  " .. VALUE_COLOR .. L["/lb help|r"])
@@ -1679,36 +1679,36 @@ SlashCmdList["LUABOOST"] = function(input)
     elseif input == "thrash" or input == "tg" then
         local sk, ps, hk, act, wid = LuaBoost_GetThrashStats()
         orig_print(ADDON_COLOR .. L["[LuaBoost]|r UI Thrashing Protection:"])
-        orig_print(orig_format("  Status: %s | Hooks: %d/6",
-        act and "|cff00ff00ACTIVE|r" or "|cffff0000OFF|r", hk))
-        orig_print(orig_format("  Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r",
+        orig_print(orig_format(L["  Status: %s | Hooks: %d/6"],
+        act and L["|cff00ff00ACTIVE|r"] or L["|cffff0000OFF|r"], hk))
+        orig_print(orig_format(L["  Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r"],
             sk, ps))
         if (sk + ps) > 0 then
-            orig_print(orig_format("  Hit rate: |cff00ff00%.1f%%|r",
+            orig_print(orig_format(L["  Hit rate: |cff00ff00%.1f%%|r"],
                 sk / (sk + ps) * 100))
         end
-        orig_print(orig_format("  Cached widgets: %d", wid))
+        orig_print(orig_format(L["  Cached widgets: %d"], wid))
 
     elseif input == "tg toggle" or input == "thrash toggle" then
         if thrashStats.active then
             UninstallThrashGuard()
             db.thrashGuardEnabled = false
-            Msg("UI Thrashing Protection: |cffff0000OFF|r (hooks removed)")
+            Msg(L["UI Thrashing Protection: |cffff0000OFF|r (hooks removed)"])
         else
             db.thrashGuardEnabled = true
             local ok, err = orig_pcall(InstallThrashGuard)
             if ok and thrashStats.active then
-                Msg(orig_format("UI Thrashing Protection: |cff00ff00ON|r (%d hooks)",
+                Msg(orig_format(L["UI Thrashing Protection: |cff00ff00ON|r (%d hooks)"],
                     thrashStats.hooked))
             else
-                Msg("UI Thrashing Protection: |cffff0000FAILED|r — " .. tostring(err))
+                Msg(L["UI Thrashing Protection: |cffff0000FAILED|r — "] .. tostring(err))
             end
         end
 
     elseif input == "tg reset" or input == "thrash reset" then
         thrashStats.skipped = 0
         thrashStats.passed  = 0
-        Msg("ThrashGuard stats reset")
+        Msg(L["ThrashGuard stats reset"])
 
     elseif input == "settings" then
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
@@ -1727,7 +1727,7 @@ SlashCmdList["LUABOOST"] = function(input)
         orig_print(L["  /lb settings     — open GC settings"])
         orig_print(L["  /lb tg           — UI thrash protection stats"])
         orig_print(L["  /lb tg toggle    — enable/disable thrash guard"])
-        orig_print(L["  /lb tg reset     — reset thrash guard counters"])        
+        orig_print(L["  /lb tg reset     — reset thrash guard counters"])
     else
         ShowStatus()
     end
@@ -1778,7 +1778,7 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
         if db.thrashGuardEnabled then
             local tgOk, tgErr = orig_pcall(InstallThrashGuard)
             if not tgOk then
-                DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+                DebugMsg(L["ThrashGuard install error: "] .. tostring(tgErr))
             end
         end
 
