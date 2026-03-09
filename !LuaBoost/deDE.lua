@@ -1,7 +1,7 @@
--- LuaBoost English Localization (Base) v1.3.0
+-- LuaBoost German Localization (Base) v1.3.0
 -- This file serves as the default reference for all translations.
 
-LuaBoost_Locale_enUS = {
+LuaBoost_Locale_deDE = {
     -- PART A: Runtime Optimizations
 
     -- PART B: Smart GC Manager
