@@ -188,6 +188,12 @@ Interface/AddOns/!LuaBoost/
 
 ---
 
+## ⭐ Reviews
+
+See what other players say: [**Reviews & Testimonials**](https://github.com/suprepupre/wow-optimize/discussions/10)
+
+Used wow_optimize or LuaBoost? [**Leave a review!**](https://github.com/suprepupre/wow-optimize/discussions/10)
+
 ## 📜 License
 
 MIT License — do whatever you want with it.
