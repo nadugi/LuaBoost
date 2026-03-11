@@ -687,8 +687,10 @@ local function OnBurstEvent(event)
 
     local burstKB = 128
 
+    if db.debug and event ~= "CHAT_MSG_LOOT" then
     DebugMsg(orig_format("GC burst: %s (step %d KB)", event, burstKB))
-
+    end
+    
     if hasDLL() and LuaBoostC_GCStep then
         LuaBoostC_GCStep(burstKB)
     else
