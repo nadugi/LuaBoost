@@ -1,4 +1,4 @@
-# ⚡️ LuaBoost v1.5.0 (WotLK 3.3.5a)
+# ⚡️ LuaBoost v1.5.1 (WotLK 3.3.5a)
 
 **Lua runtime optimizer + SmartGC + SpeedyLoad + UI Thrashing Protection for World of Warcraft 3.3.5a (build 12340)**  
 Author: **Suprematist**

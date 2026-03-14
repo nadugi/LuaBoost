@@ -1,5 +1,5 @@
 -- ================================================================
---  LuaBoost v1.5.0 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
+--  LuaBoost v1.5.1 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
 --  Author: Suprematist
 --
 --  Features:
@@ -9,9 +9,6 @@
 --   - SpeedyLoad: event suppression during loading screens
 --   - Optional protection hooks (intercept GC, block memory scans)
 --   - DLL integration (wow_optimize.dll v1.4+)
---
---  v1.3.0 changes:
---   - Added UI Thrashing Protection (StatusBar only, 100% taint free)
 -- ================================================================
 
 local addonName, addonTable = ...
@@ -34,7 +31,6 @@ end
 local locale = GetLocale()
 local localeData = _G["LuaBoost_Locale_" .. locale]
 
-local locale = GetLocale()
 if locale ~= "enUS" then
     if localeData then
         for k, v in pairs(localeData) do
@@ -46,7 +42,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.5.0"
+local ADDON_VERSION = "1.5.1"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -129,6 +125,7 @@ end
 function _G.LuaBoost_ReleaseTable(t)
     if orig_type(t) ~= "table" then return end
     if poolCount >= POOL_MAX then return end
+    if orig_getmetatable(t) then return end
 
     poolStats.released = poolStats.released + 1
 
@@ -648,7 +645,7 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
     if not db or not db.enabled then return end
 
     -- Idle detection
-    if not isIdle and not inCombat and not isLoading and (orig_GetTime() - lastActivity) > db.idleTimeout then
+    if not isIdle and not inCombat and not isLoading and (cachedTime - lastActivity) > db.idleTimeout then
         isIdle = true
         WriteIdleGlobal()
         DebugMsg(L["Idle mode activated"])
@@ -670,7 +667,7 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
         gcMemCheckCounter = 0
         memKB = orig_collectgarbage("count")
     end
-    if memKB and memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading  then
+    if memKB and memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading and elapsed < 0.033 then
         orig_debugprofilestart()
         orig_collectgarbage("collect")
         orig_collectgarbage("collect")
@@ -822,8 +819,7 @@ end)
 -- Combat tracking
 local function OnCombatEvent(event)
     if event == "PLAYER_REGEN_DISABLED" then
-        inCombat = true
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         if isIdle then isIdle = false; WriteIdleGlobal() end
         WriteCombatGlobal()
 
@@ -832,8 +828,7 @@ local function OnCombatEvent(event)
         end
 
     elseif event == "PLAYER_REGEN_ENABLED" then
-        inCombat = false
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         WriteCombatGlobal()
 
         if hasDLL() and LuaBoostC_SetCombat then
@@ -897,7 +892,7 @@ local activityEvents = {
 }
 
 local function OnActivityEvent()
-    lastActivity = orig_GetTime()
+    lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
     if isIdle then
         isIdle = false
         WriteIdleGlobal()
@@ -988,8 +983,9 @@ local function SpeedyLoad_Suppress()
     local count = 0
 
     for event, frames in orig_pairs(speedyTracked) do
-        for i = 1, orig_select("#", orig_GetFramesForEvent(event)) do
-            local frame = orig_select(i, orig_GetFramesForEvent(event))
+        local registered = {orig_GetFramesForEvent(event)}
+        for i = 1, #registered do
+            local frame = registered[i]
             if frame and frame ~= speedyFrame then
                 local unreg = frame.UnregisterEvent
                 if unreg then
@@ -1142,7 +1138,7 @@ local function OnLoadingEvent(event)
 
         isLoading = false
         WriteLoadingGlobal()
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         if isIdle then
             isIdle = false
             WriteIdleGlobal()
@@ -1159,7 +1155,7 @@ local function OnLoadingEvent(event)
         if isLoading then
             isLoading = false
             WriteLoadingGlobal()
-            lastActivity = orig_GetTime()
+            lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
             if isIdle then
                 isIdle = false
                 WriteIdleGlobal()
@@ -2029,9 +2025,13 @@ local function OnPlayerLogin(event)
 
     -- Install UI Thrashing Protection
     if db.thrashGuardEnabled then
-        local tgOk, tgErr = orig_pcall(InstallThrashGuard)
-        if not tgOk then
-            DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+        if hasDLL() then
+            DebugMsg("ThrashGuard: skipped — DLL C-level hooks handle StatusBar caching")
+        else
+            local tgOk, tgErr = orig_pcall(InstallThrashGuard)
+            if not tgOk then
+                DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+            end
         end
     end
 
@@ -2047,6 +2047,8 @@ local function OnPlayerLogin(event)
 
     if thrashStats.active then
         parts[#parts + 1] = "|cff00ff00TG:" .. thrashStats.hooked .. "|r"
+    elseif db.thrashGuardEnabled and hasDLL() then
+        parts[#parts + 1] = "|cff00ff00TG:DLL|r"
     end
 
     parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
