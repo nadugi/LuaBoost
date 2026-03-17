@@ -157,8 +157,8 @@ LuaBoost_Locale_koKR = {
     ["  /lb tg reset     — reset thrash guard counters"] = "  /lb tg reset  - UI 과부하 보호 통계 초기화",
     ["  /lb updates      — show registered update callbacks"]   = "  /lb updates   — 등록된 실시간 실행 작업 목록",
     ["  /lb events       — profile events for 10 seconds"]      = "  /lb events    — 10초간 게임 이벤트 발생 빈도 측정",
-    ["  /lb fps          — FPS monitor for 10 seconds"]         = "  /lb fps       — 10초간 프레임 수치 측정"
-    ["  /lb memleak      — addon memory leak scanner (30 sec)"] = "  /lb memleak   — 30초간 메모리 증가율이 가장 높은 상위 10개 애드온을 표시"
+    ["  /lb fps          — FPS monitor for 10 seconds"]         = "  /lb fps       — 10초간 프레임 수치 측정",
+    ["  /lb memleak      — addon memory leak scanner (30 sec)"] = "  /lb memleak   — 30초간 메모리 증가율이 가장 높은 상위 10개 애드온을 표시",
 
     -- PART G: Initialization
     ["GC: "] = "정리: ",
